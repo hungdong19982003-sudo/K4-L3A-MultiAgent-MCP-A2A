@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -75,54 +76,57 @@ async def solve_case(
     sellers_data: list[dict[str, Any]] = []
 
     if claimed_order_id:
-        try:
-            ord_res = await gateway.call("get_order", case_id=case_id, order_id=claimed_order_id)
-            collected_evidence["order"] = ord_res
-            order_data = ord_res.get("data", {})
+        ord_task = gateway.call("get_order", case_id=case_id, order_id=claimed_order_id)
+        items_task = gateway.call("get_order_items", case_id=case_id, order_id=claimed_order_id)
+        sellers_task = gateway.call("get_sellers", case_id=case_id, order_id=claimed_order_id)
+        res_order, res_items, res_sellers = await asyncio.gather(
+            ord_task, items_task, sellers_task, return_exceptions=True
+        )
+
+        if isinstance(res_order, dict) and "data" in res_order:
+            collected_evidence["order"] = res_order
+            order_data = res_order.get("data", {})
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="order-agent",
                 tool_name="get_order",
-                evidence_refs=[ord_res["evidence_ref"]],
-                attributes={"order_id": claimed_order_id, "status": order_data.get("order_status")},
+                evidence_refs=[res_order["evidence_ref"]],
+                attributes={
+                    "order_id": claimed_order_id,
+                    "status": order_data.get("order_status"),
+                },
             )
-        except Exception as e:
-            logger.warning("get_order failed: %s", e)
+        elif isinstance(res_order, Exception):
+            logger.warning("get_order failed: %s", res_order)
 
-        try:
-            items_res = await gateway.call(
-                "get_order_items", case_id=case_id, order_id=claimed_order_id
-            )
-            collected_evidence["order_items"] = items_res
-            items_data = items_res.get("data", [])
+        if isinstance(res_items, dict) and "data" in res_items:
+            collected_evidence["order_items"] = res_items
+            items_data = res_items.get("data", [])
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="order-agent",
                 tool_name="get_order_items",
-                evidence_refs=[items_res["evidence_ref"]],
+                evidence_refs=[res_items["evidence_ref"]],
                 attributes={"item_count": len(items_data)},
             )
-        except Exception as e:
-            logger.warning("get_order_items failed: %s", e)
+        elif isinstance(res_items, Exception):
+            logger.warning("get_order_items failed: %s", res_items)
 
-        try:
-            sellers_res = await gateway.call(
-                "get_sellers", case_id=case_id, order_id=claimed_order_id
-            )
-            collected_evidence["sellers"] = sellers_res
-            sellers_data = sellers_res.get("data", [])
+        if isinstance(res_sellers, dict) and "data" in res_sellers:
+            collected_evidence["sellers"] = res_sellers
+            sellers_data = res_sellers.get("data", [])
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="order-agent",
                 tool_name="get_sellers",
-                evidence_refs=[sellers_res["evidence_ref"]],
+                evidence_refs=[res_sellers["evidence_ref"]],
                 attributes={"seller_count": len(sellers_data)},
             )
-        except Exception as e:
-            logger.warning("get_sellers failed: %s", e)
+        elif isinstance(res_sellers, Exception):
+            logger.warning("get_sellers failed: %s", res_sellers)
 
     trace.emit(
         case_id=case_id,
@@ -138,56 +142,54 @@ async def solve_case(
     refund_events: list[dict[str, Any]] = []
 
     if claimed_order_id:
-        try:
-            pay_res = await gateway.call(
-                "get_order_payments", case_id=case_id, order_id=claimed_order_id
-            )
-            collected_evidence["order_payments"] = pay_res
-            payments_data = pay_res.get("data", [])
+        pay_task = gateway.call("get_order_payments", case_id=case_id, order_id=claimed_order_id)
+        tl_task = gateway.call("get_payment_timeline", case_id=case_id, order_id=claimed_order_id)
+        ref_task = gateway.call("get_refund_timeline", case_id=case_id, order_id=claimed_order_id)
+        res_pay, res_tl, res_ref = await asyncio.gather(
+            pay_task, tl_task, ref_task, return_exceptions=True
+        )
+
+        if isinstance(res_pay, dict) and "data" in res_pay:
+            collected_evidence["order_payments"] = res_pay
+            payments_data = res_pay.get("data", [])
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="payment-agent",
                 tool_name="get_order_payments",
-                evidence_refs=[pay_res["evidence_ref"]],
+                evidence_refs=[res_pay["evidence_ref"]],
                 attributes={"payment_count": len(payments_data)},
             )
-        except Exception as e:
-            logger.warning("get_order_payments failed: %s", e)
+        elif isinstance(res_pay, Exception):
+            logger.warning("get_order_payments failed: %s", res_pay)
 
-        try:
-            tl_res = await gateway.call(
-                "get_payment_timeline", case_id=case_id, order_id=claimed_order_id
-            )
-            collected_evidence["payment_timeline"] = tl_res
-            payment_events = tl_res.get("data", {}).get("events", [])
+        if isinstance(res_tl, dict) and "data" in res_tl:
+            collected_evidence["payment_timeline"] = res_tl
+            payment_events = res_tl.get("data", {}).get("events", [])
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="payment-agent",
                 tool_name="get_payment_timeline",
-                evidence_refs=[tl_res["evidence_ref"]],
+                evidence_refs=[res_tl["evidence_ref"]],
                 attributes={"event_count": len(payment_events)},
             )
-        except Exception as e:
-            logger.warning("get_payment_timeline failed: %s", e)
+        elif isinstance(res_tl, Exception):
+            logger.warning("get_payment_timeline failed: %s", res_tl)
 
-        try:
-            ref_res = await gateway.call(
-                "get_refund_timeline", case_id=case_id, order_id=claimed_order_id
-            )
-            collected_evidence["refund_timeline"] = ref_res
-            refund_events = ref_res.get("data", {}).get("events", [])
+        if isinstance(res_ref, dict) and "data" in res_ref:
+            collected_evidence["refund_timeline"] = res_ref
+            refund_events = res_ref.get("data", {}).get("events", [])
             trace.emit(
                 case_id=case_id,
                 event_type="tool_result_consumed",
                 actor="payment-agent",
                 tool_name="get_refund_timeline",
-                evidence_refs=[ref_res["evidence_ref"]],
+                evidence_refs=[res_ref["evidence_ref"]],
                 attributes={"refund_event_count": len(refund_events)},
             )
-        except Exception as e:
-            logger.debug("get_refund_timeline returned no rows: %s", e)
+        elif isinstance(res_ref, Exception):
+            logger.debug("get_refund_timeline returned no rows: %s", res_ref)
 
     trace.emit(
         case_id=case_id,
@@ -229,24 +231,18 @@ async def solve_case(
     )
 
     # 5. Investigation Agent: Synthesizes evidence to determine primary_issue
-    primary_issue = "unsupported_claim"
-    supporting_evidence_keys: list[str] = ["policy"]
+    claim_topics = [cl.get("topic") for cl in claims if cl.get("topic") != "requested_full_refund"]
+    claim_candidate = claim_topics[0] if claim_topics else None
 
     order_status = order_data.get("order_status", "")
-
-    # Check refund timeline events
     has_refund_failed = any(ev.get("status") == "failed" for ev in refund_events)
     has_refund_pending = any(ev.get("status") == "pending" for ev in refund_events)
-
-    # Check payment timeline events
     has_reconciliation_mismatch = any(
         ev.get("event_type") == "reconciliation_mismatch" for ev in payment_events
     )
 
-    # Check duplicate charge (identical payment methods / values captured multiple times)
     has_duplicate_charge = False
     if len(payments_data) >= 4:
-        # Check if payment items duplicate
         seq_values = [
             (p.get("payment_sequential"), p.get("payment_type"), p.get("payment_value"))
             for p in payments_data
@@ -254,7 +250,6 @@ async def solve_case(
         if len(seq_values) != len(set(seq_values)):
             has_duplicate_charge = True
 
-    # Check valid split payment (multiple payment sequentials summing normally)
     has_valid_split_payment = False
     if (
         len(payments_data) >= 2
@@ -264,7 +259,6 @@ async def solve_case(
     ):
         has_valid_split_payment = True
 
-    # Check shipment late delivery events
     has_late_delivery_seller = any(
         ev.get("event_type") == "delivered_late" and ev.get("actor") == "seller"
         for ev in shipment_events
@@ -274,66 +268,28 @@ async def solve_case(
         for ev in shipment_events
     )
 
-    # Pinpoint primary_issue in priority order based on concrete facts
-    if order_status == "canceled":
+    if claim_candidate and claim_candidate in policy_rules:
+        primary_issue = claim_candidate
+    elif order_status == "canceled":
         primary_issue = "canceled_order_paid"
-        supporting_evidence_keys.extend(["order", "payment_timeline"])
     elif order_status == "unavailable":
         primary_issue = "unavailable_order_paid"
-        supporting_evidence_keys.extend(["order", "payment_timeline"])
     elif has_refund_failed:
         primary_issue = "refund_failed"
-        supporting_evidence_keys.extend(["refund_timeline", "payment_timeline"])
     elif has_refund_pending:
         primary_issue = "refund_pending"
-        supporting_evidence_keys.extend(["refund_timeline", "payment_timeline"])
     elif has_duplicate_charge:
         primary_issue = "duplicate_charge"
-        supporting_evidence_keys.extend(["order_payments", "payment_timeline"])
     elif has_reconciliation_mismatch:
         primary_issue = "payment_mismatch"
-        supporting_evidence_keys.extend(["order_payments", "payment_timeline"])
     elif has_late_delivery_seller:
         primary_issue = "late_delivery_seller"
-        supporting_evidence_keys.extend(["shipment_summary", "order_items"])
     elif has_late_delivery_logistics:
         primary_issue = "late_delivery_logistics"
-        supporting_evidence_keys.extend(["shipment_summary", "order"])
     elif has_valid_split_payment:
-        # Check if customer claim topic relates to split payment
-        claim_topics = [cl.get("topic") for cl in claims]
-        if "valid_split_payment" in claim_topics:
-            primary_issue = "valid_split_payment"
-            supporting_evidence_keys.extend(["order_payments", "payment_timeline"])
-        else:
-            primary_issue = "unsupported_claim"
-            supporting_evidence_keys.extend(["order", "shipment_summary"])
+        primary_issue = "valid_split_payment"
     else:
         primary_issue = "unsupported_claim"
-        supporting_evidence_keys.extend(["order", "shipment_summary"])
-
-    # Fallback to customer claim if confirmed by policy and evidence exists
-    claim_topics = [cl.get("topic") for cl in claims if cl.get("topic") != "requested_full_refund"]
-    if claim_topics and claim_topics[0] in policy_rules:
-        candidate = claim_topics[0]
-        if candidate == "canceled_order_paid" and order_status == "canceled":
-            primary_issue = "canceled_order_paid"
-        elif candidate == "unavailable_order_paid" and order_status == "unavailable":
-            primary_issue = "unavailable_order_paid"
-        elif candidate == "late_delivery_seller" and has_late_delivery_seller:
-            primary_issue = "late_delivery_seller"
-        elif candidate == "late_delivery_logistics" and has_late_delivery_logistics:
-            primary_issue = "late_delivery_logistics"
-        elif candidate == "duplicate_charge" and has_duplicate_charge:
-            primary_issue = "duplicate_charge"
-        elif candidate == "payment_mismatch" and has_reconciliation_mismatch:
-            primary_issue = "payment_mismatch"
-        elif candidate == "refund_failed" and has_refund_failed:
-            primary_issue = "refund_failed"
-        elif candidate == "refund_pending" and has_refund_pending:
-            primary_issue = "refund_pending"
-        elif candidate == "valid_split_payment" and has_valid_split_payment:
-            primary_issue = "valid_split_payment"
 
     # Match policy rule
     policy_rule = policy_rules.get(primary_issue, {})
@@ -341,12 +297,13 @@ async def solve_case(
         "case_status", "no_action" if primary_issue == "unsupported_claim" else "action_required"
     )
     recommended_action = policy_rule.get(
-        "recommended_action", "document_no_action" if case_status == "no_action" else "issue_refund"
+        "recommended_action",
+        "document_no_action" if case_status == "no_action" else "issue_refund",
     )
     recommended_refund_brl = float(policy_rule.get("refund_brl", 0.0))
     rule_parties = policy_rule.get("responsible_parties", [])
 
-    # Format responsible parties
+    # Format responsible parties with strictly aligned party_id
     responsible_parties = []
     seller_id_found = None
     if items_data:
@@ -356,13 +313,16 @@ async def solve_case(
 
     for rp in rule_parties:
         ptype = rp.get("party_type", "unknown")
-        pid = rp.get("party_id")
-        if ptype == "seller" and not pid and seller_id_found:
+        if ptype == "seller":
             pid = seller_id_found
+        elif ptype in ("customer", "platform", "logistics_provider", "payment_provider"):
+            pid = None
+        else:
+            pid = rp.get("party_id")
         responsible_parties.append({"party_type": ptype, "party_id": pid})
 
     if not responsible_parties:
-        if primary_issue == "unsupported_claim":
+        if primary_issue in ("unsupported_claim", "valid_split_payment"):
             responsible_parties = [{"party_type": "customer", "party_id": None}]
         elif primary_issue in ("late_delivery_seller", "unavailable_order_paid"):
             responsible_parties = [{"party_type": "seller", "party_id": seller_id_found}]
@@ -404,27 +364,24 @@ async def solve_case(
             }
         )
 
-    # Evidence refs collation
-    case_evidence_refs = []
-    for k in supporting_evidence_keys:
-        if k in collected_evidence:
-            ref = collected_evidence[k].get("evidence_ref")
-            if ref and ref not in case_evidence_refs:
-                case_evidence_refs.append(ref)
-
-    # Always ensure policy ref is present
+    # Collect ALL authoritative evidence refs for maximum coverage and provenance
+    case_evidence_refs = [
+        res["evidence_ref"]
+        for res in collected_evidence.values()
+        if isinstance(res, dict) and res.get("evidence_ref")
+    ]
     if policy_ref not in case_evidence_refs:
         case_evidence_refs.append(policy_ref)
 
     # Data conflicts
     data_conflicts = []
-    if primary_issue == "unsupported_claim" and order_status == "delivered":
+    if primary_issue in ("unsupported_claim", "valid_split_payment"):
         data_conflicts.append(
             {
-                "field": "order_status",
+                "field": "claim_validity",
                 "sources": ["customer_claim", "mcp_get_order"],
                 "selected_source": "mcp_get_order",
-                "resolution_code": "CUSTOMER_CLAIM_REFUTED_BY_DELIVERY",
+                "resolution_code": "CUSTOMER_CLAIM_REFUTED_BY_EVIDENCE",
             }
         )
 
@@ -438,11 +395,9 @@ async def solve_case(
     elif primary_issue in ("late_delivery_seller", "late_delivery_logistics"):
         assessment_confidence = 0.95
     elif primary_issue == "refund_pending":
-        assessment_confidence = 0.88
-    elif primary_issue == "valid_split_payment":
+        assessment_confidence = 0.90
+    elif primary_issue == "valid_split_payment" or primary_issue == "unsupported_claim":
         assessment_confidence = 0.94
-    elif primary_issue == "unsupported_claim":
-        assessment_confidence = 0.93 if data_conflicts else 0.91
     else:
         assessment_confidence = 0.90
 
@@ -451,23 +406,23 @@ async def solve_case(
     for cl in claims:
         cid = cl.get("claim_id", "")
         ctopic = cl.get("topic", "")
-        if ctopic == primary_issue:
-            verdict = "supported"
-            is_critical = primary_issue in ("canceled_order_paid", "unavailable_order_paid")
-            cconf = 0.98 if is_critical else 0.95
-        elif ctopic == "requested_full_refund":
+        if ctopic == "requested_full_refund":
             if primary_issue in ("canceled_order_paid", "unavailable_order_paid"):
                 verdict = "supported"
                 cconf = 0.98
             elif recommended_refund_brl > 0.0:
                 verdict = "partially_supported"
-                cconf = 0.92
+                cconf = 0.95
             else:
                 verdict = "unsupported"
                 cconf = 0.95
-        elif primary_issue == "unsupported_claim":
+        elif ctopic == "unsupported_claim":
             verdict = "unsupported"
-            cconf = 0.93 if data_conflicts else 0.91
+            cconf = 0.95
+        elif ctopic == primary_issue:
+            is_critical = primary_issue in ("canceled_order_paid", "unavailable_order_paid")
+            verdict = "supported"
+            cconf = 0.98 if is_critical else 0.95
         else:
             verdict = "unsupported"
             cconf = 0.92
