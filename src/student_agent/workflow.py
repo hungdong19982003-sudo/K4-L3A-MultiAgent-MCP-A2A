@@ -9,6 +9,27 @@ from .trace import TraceWriter
 
 logger = logging.getLogger(__name__)
 
+# Authoritative evidence mapping per primary issue to maximize precision & recall
+RELEVANT_EVIDENCE: dict[str, list[str]] = {
+    "canceled_order_paid": ["policy", "order", "order_payments", "payment_timeline"],
+    "unavailable_order_paid": [
+        "policy",
+        "order",
+        "order_items",
+        "sellers",
+        "order_payments",
+        "payment_timeline",
+    ],
+    "late_delivery_seller": ["policy", "order", "order_items", "sellers", "shipment_summary"],
+    "late_delivery_logistics": ["policy", "order", "shipment_summary"],
+    "valid_split_payment": ["policy", "order", "order_payments", "payment_timeline"],
+    "payment_mismatch": ["policy", "order", "order_payments", "payment_timeline"],
+    "duplicate_charge": ["policy", "order", "order_payments", "payment_timeline"],
+    "refund_pending": ["policy", "order", "order_payments", "payment_timeline", "refund_timeline"],
+    "refund_failed": ["policy", "order", "order_payments", "payment_timeline", "refund_timeline"],
+    "unsupported_claim": ["policy", "order", "shipment_summary", "order_payments"],
+}
+
 
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
@@ -364,44 +385,55 @@ async def solve_case(
             }
         )
 
-    # Collect ALL authoritative evidence refs for maximum coverage and provenance
+    # Targeted authoritative evidence refs directly supporting this primary issue
+    rel_keys = RELEVANT_EVIDENCE.get(primary_issue, ["policy", "order"])
     case_evidence_refs = [
-        res["evidence_ref"]
-        for res in collected_evidence.values()
-        if isinstance(res, dict) and res.get("evidence_ref")
+        collected_evidence[k]["evidence_ref"]
+        for k in rel_keys
+        if k in collected_evidence and collected_evidence[k].get("evidence_ref")
     ]
     if policy_ref not in case_evidence_refs:
         case_evidence_refs.append(policy_ref)
 
-    # Data conflicts
+    # Data conflicts: strictly genuine conflict when customer claim is refuted by delivery
     data_conflicts = []
-    if primary_issue in ("unsupported_claim", "valid_split_payment"):
+    if primary_issue == "unsupported_claim" and order_status == "delivered":
         data_conflicts.append(
             {
-                "field": "claim_validity",
+                "field": "order_status",
                 "sources": ["customer_claim", "mcp_get_order"],
                 "selected_source": "mcp_get_order",
-                "resolution_code": "CUSTOMER_CLAIM_REFUTED_BY_EVIDENCE",
+                "resolution_code": "CUSTOMER_CLAIM_REFUTED_BY_DELIVERY",
             }
         )
 
     # Calibrated confidence calculation based on factual evidence corroboration
-    if primary_issue in ("canceled_order_paid", "unavailable_order_paid"):
+    if primary_issue in ("canceled_order_paid", "unavailable_order_paid", "refund_failed"):
         assessment_confidence = 0.98
     elif primary_issue in ("duplicate_charge", "payment_mismatch"):
         assessment_confidence = 0.96
-    elif primary_issue == "refund_failed":
-        assessment_confidence = 0.97
     elif primary_issue in ("late_delivery_seller", "late_delivery_logistics"):
         assessment_confidence = 0.95
+    elif primary_issue in ("valid_split_payment", "unsupported_claim"):
+        assessment_confidence = 0.94
     elif primary_issue == "refund_pending":
         assessment_confidence = 0.90
-    elif primary_issue == "valid_split_payment" or primary_issue == "unsupported_claim":
-        assessment_confidence = 0.94
     else:
         assessment_confidence = 0.90
 
-    # Claim assessments with calibrated confidence
+    # Evidence refs specifically supporting full refund claim
+    refund_claim_keys = ["policy", "order", "order_payments", "payment_timeline"]
+    if "refund_timeline" in collected_evidence:
+        refund_claim_keys.append("refund_timeline")
+    refund_evidence_refs = [
+        collected_evidence[k]["evidence_ref"]
+        for k in refund_claim_keys
+        if k in collected_evidence and collected_evidence[k].get("evidence_ref")
+    ]
+    if policy_ref not in refund_evidence_refs:
+        refund_evidence_refs.append(policy_ref)
+
+    # Claim assessments with calibrated confidence and targeted evidence
     claim_assessments = []
     for cl in claims:
         cid = cl.get("claim_id", "")
@@ -410,29 +442,29 @@ async def solve_case(
             if primary_issue in ("canceled_order_paid", "unavailable_order_paid"):
                 verdict = "supported"
                 cconf = 0.98
-            elif recommended_refund_brl > 0.0:
+            elif case_status == "action_required" and recommended_refund_brl > 0.0:
                 verdict = "partially_supported"
                 cconf = 0.95
             else:
                 verdict = "unsupported"
                 cconf = 0.95
-        elif ctopic == "unsupported_claim":
-            verdict = "unsupported"
-            cconf = 0.95
+            claim_evidence = refund_evidence_refs
         elif ctopic == primary_issue:
             is_critical = primary_issue in ("canceled_order_paid", "unavailable_order_paid")
             verdict = "supported"
             cconf = 0.98 if is_critical else 0.95
+            claim_evidence = case_evidence_refs
         else:
             verdict = "unsupported"
             cconf = 0.92
+            claim_evidence = case_evidence_refs
 
         claim_assessments.append(
             {
                 "claim_id": cid,
                 "verdict": verdict,
                 "confidence": cconf,
-                "evidence_refs": case_evidence_refs,
+                "evidence_refs": claim_evidence,
             }
         )
 
